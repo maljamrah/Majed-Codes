@@ -1,0 +1,66 @@
+/* 
+   - MEF members in counties 02/56 (dedup to 1 row per CIN)
+   - Exclude anyone who has ANY HRSN form in FindHelp
+   - Add form_names = all NON-HRSN form names (distinct) for that CIN
+*/
+
+;WITH mef_dedup AS (
+    SELECT *
+    FROM (
+        SELECT
+            m.*,
+            ROW_NUMBER() OVER (PARTITION BY m.MbrID ORDER BY (SELECT NULL)) AS rn
+        FROM dbo.nyec_mef m
+        WHERE m.MbrLvlResCountyCd IN ('02','56')
+    ) x
+    WHERE x.rn = 1
+),
+mef_cins AS (
+    SELECT DISTINCT MbrID AS cin
+    FROM mef_dedup
+),
+cin_map AS (
+    SELECT DISTINCT
+        f.seeker_id,
+        LTRIM(RTRIM(f.answer)) AS cin
+    FROM dbo.FH_flipa_mbr_insights_forms f
+    INNER JOIN mef_cins mc
+        ON mc.cin = LTRIM(RTRIM(f.answer))          -- only CINs we care about
+    WHERE f.question LIKE '%CIN%'
+      AND f.answer IS NOT NULL
+),
+forms_for_mef AS (
+    SELECT DISTINCT
+        cm.cin,
+        f.form_name
+    FROM cin_map cm
+    JOIN dbo.FH_flipa_mbr_insights_forms f
+      ON f.seeker_id = cm.seeker_id
+    WHERE f.form_name IS NOT NULL
+),
+hrsn_cins AS (
+    SELECT DISTINCT cin
+    FROM forms_for_mef
+    WHERE LOWER(form_name) LIKE '%hrsn%'
+),
+non_hrsn_agg AS (
+    SELECT
+        cin,
+        STRING_AGG(form_name, '; ') AS form_names
+    FROM (
+        SELECT DISTINCT cin, form_name
+        FROM forms_for_mef
+        WHERE LOWER(form_name) NOT LIKE '%hrsn%'
+    ) t
+    GROUP BY cin
+)
+SELECT
+    m.*,
+    a.form_names
+FROM mef_dedup m
+LEFT JOIN hrsn_cins h
+  ON h.cin = m.MbrID
+LEFT JOIN non_hrsn_agg a
+  ON a.cin = m.MbrID
+WHERE h.cin IS NULL
+ORDER BY m.MbrLastName, m.MbrFirstName;
